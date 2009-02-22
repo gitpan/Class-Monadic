@@ -4,7 +4,7 @@ use 5.008_001;
 use strict;
 use warnings;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 use Exporter qw(import);
 our @EXPORT_OK   = qw(monadic);
@@ -24,8 +24,9 @@ sub _cannot_initialize{
 
 sub monadic{
 	my($object) = @_;
+	ref($object) or _cannot_initialize();
 
-	return __PACKAGE__->initialize($object);
+	return $Meta{$object} ||= __PACKAGE__->_new($object);
 }
 
 sub initialize{
@@ -44,10 +45,11 @@ sub _new{
 		class   => $class,
 		id      => sprintf('0x%x', Scalar::Util::refaddr($object)),
 
-		object  => undef,
+		object  => $object,
 		isa     => undef,
 		sclass  => undef,
 	}, $metaclass;
+	Scalar::Util::weaken( $meta->{object} );
 
 	my $sclass      = $class . '::' . $meta->{id};
 	my $sclass_isa  = do{ no strict 'refs'; \@{$sclass . '::ISA'} };
@@ -55,9 +57,7 @@ sub _new{
 	$meta->{sclass} = $sclass;
 	$meta->{isa}    = $sclass_isa;
 
-	Scalar::Util::weaken( $meta->{object} = $object );
-
-	@{$sclass_isa} = ($class);
+	@{$sclass_isa} = ('Class::Monadic::Object', $class);
 
 	bless $object, $sclass; # re-bless
 	return $meta;
@@ -73,31 +73,56 @@ sub name{
 sub add_method{
 	my $meta = shift;
 
-	Data::Util::install_subroutine($meta->{sclass}, @_);
+	Data::Util::install_subroutine($meta->{sclass}, @_); # dies on fail
 	return;
 }
 
 sub add_field{
 	my $meta = shift;
 
-	foreach my $name(@_){
-		Data::Util::is_string($name)
-			or Carp::croak('You must supply a field name');
+	my $fields_ref = Data::Util::mkopt_hash(\@_, 'add_field', [qw(Regexp ARRAY CODE)]);
 
-		my $field;
+	my $field_map_ref = $meta->{field_map} ||= {};
+
+	while(my($name, $validator) = each %{$fields_ref}){
+
+		my $field_ref = \$field_map_ref->{$name};
+		my $validate_sub;
+
+		if($validator){
+			if(Data::Util::is_regex_ref $validator){
+				$validate_sub = sub{ $_[0] =~ /$validator/ };
+			}
+			elsif(Data::Util::is_array_ref $validator){
+				my %words;
+				@words{@{$validator}} = ();
+				$validate_sub = sub{ exists $words{ $_[0] } };
+			}
+			else{ # CODE reference
+				$validate_sub = $validator;
+			}
+		}
 
 		$meta->add_method(
 			"get_$name" => sub{
 				if(@_ > 1){
-					Carp::croak("Too many arguments for get_$name");
+					Carp::croak "Too many arguments for get_$name";
 				}
-				return $field;
+				return ${$field_ref};
 			},
-			"set_$name" => sub{
+			"set_$name" => 	sub{
 				if(@_ > 2){
-					Carp::croak("Cannot set multiple values for set_$name");
+					Carp::croak "Cannot set multiple values for set_$name";
 				}
-				$field = $_[1];
+				if($validate_sub){
+					my $value = $_[1];
+					$validate_sub->($value)
+						or Carp::croak 'Invalid value ', Data::Util::neat($value), " for set_$name";
+					${$field_ref} = $value;
+				}
+				else{
+					${$field_ref} = $_[1];
+				}
 				return $_[0]; # chained
 			},
 		);
@@ -125,20 +150,33 @@ sub inject_base{
 	return;
 }
 
-
 sub DESTROY{
 	my($meta) = @_;
 
 	my $original_stash = Data::Util::get_stash($meta->{class});
 
 	my $sclass_stashgv = delete $original_stash->{$meta->{id} . '::'};
+
+	@{$meta->{isa}} = ();
 	%{$sclass_stashgv} = ();
 
 	return;
 }
 
+package Class::Monadic::Object;
+
+sub clone{
+	Carp::croak sprintf 'Cannot clone monadic object (%s)', Data::Util::neat($_[0]);
+}
+
+sub STORABLE_freeze{
+	Carp::croak sprintf 'Cannot serialize monadic object (%s)', Data::Util::neat($_[0]);
+}
+
 1;
 __END__
+
+=for stopwords gfx
 
 =head1 NAME
 
@@ -146,43 +184,55 @@ Class::Monadic - Provides monadic methods (a.k.a. singleton methods)
 
 =head1 VERSION
 
-This document describes Class::Monadic version 0.01.
+This document describes Class::Monadic version 0.02.
 
 =head1 SYNOPSIS
 
 	use Class::Monadic;
 
-	my $dbh1 = DBI->connect(...);
+	my $ua1 = LWP::UserAgent->new();
 
-	Class::Monadic->initialize($dbh1)->add_method(
+	Class::Monadic->initialize($ua1)->add_method(
 		foo => sub{ ... },
 	);
 
 	$dbh1->foo(...); # OK
 
-	my $dbh2 = DBI->connect(...);
+	my $ua2 = LWP::UserAgent->new();
 
-	$dbh2->foo(); # throws "Can't locate object method ..."
-	              # because foo() is $dbh1 specific.
+	$ua2->foo(); # throws "Can't locate object method ..."
+	              # because foo() is $ua1 specific.
 
 	# import a syntax sugar to make an object monadic
 	use Class::Monadic qw(monadic);
 
-	monadic($dbh1)->inject_base(qw(SomeComponent OtherComponent));
-	# now $dbh1 is-a both SomeComponent and OtherComponent
+	monadic($ua1)->inject_base(qw(SomeComponent OtherComponent));
+	# now $ua1 is-a both SomeComponent and OtherComponent
 
-	monadic($dbh1)->add_field(qw(x y z));
-	$dbh1->set_x(42);
-	print $dbh->get_x(); # => 42
+	# per-object fields
+	monadic($ua1)->add_field(qw(x y z));
+	$ua1->set_x(42);
+	print $ua1->get_x(); # => 42
+
+	# per-object fields with validation
+	monadic($ua1)->add_field(
+		foo => qr/^\d+$/,
+		bar => [qw(apple banana)],
+		qux => \&is_something,
+	);
 
 =head1 DESCRIPTION
 
-C<Class::Monadic> provides per-object classs, B<monadic classes>. It is also
+C<Class::Monadic> provides per-object classes, B<monadic classes>. It is also
 known as B<singleton classes> in other languages, e.g. C<Ruby>.
 
-Monadic classes is used in order to define B<monadic methods>
-(a.k.a. B<singleton methods>), which are only available at the specific object
-they are defined into.
+Monadic classes is used in order to define B<monadic methods>, i.e. per-object
+methods (a.k.a. B<singleton methods>), which are only available at the specific
+object they are defined into.
+
+All the meta data that C<Class::Monadic> deals with are outside the object
+associated with monadic classes, so this module does not depend on the
+implementation of the object.
 
 =head1 INTERFACE
 
@@ -190,13 +240,17 @@ they are defined into.
 
 =head3 monadic($object)
 
-A syntax sugar to C<< Class::Monadic->initialize($object) >>.
+Specializes I<$object> to have a monadic class,
+and returns C<Class::Monadic> instance, I<$meta>.
+
+This is a syntax sugar to C<< Class::Monadic->initialize($object) >>.
 
 =head2 Class methods
 
 =head3 C<< Class::Monadic->initialize($object) >>
 
-Makes I<$object> monadic, and returns C<Class::Monadic> instance, I<$meta>.
+Specializes I<$object> to have a monadic class,
+and returns C<Class::Monadic> instance, I<$meta>.
 
 =head2 Instance methods
 
@@ -212,11 +266,15 @@ Adds methods into the monadic class.
 
 Adds fields and accessors named I<get_$name>/I<set_$name> into the monadic class.
 
-Fields are not stored in the object. Rather, stored in the monadic class.
+These fields are not stored in the object. Rather, stored in its class.
+
+This feature is like what C<Object::Accessor> provides, but C<Class::Monadic>
+is available for all the classes existing, whareas C<Object::Accessor>
+is only available in classes that is-a C<Object::Accessor>.
 
 =head3 C<< $meta->add_modifier($type, @method_names, $code) >>
 
-Adds method modifiers to specific methods,  Using C<Class::Method::Modifiers::Fast>.
+Adds method modifiers to specific methods, using C<Class::Method::Modifiers::Fast>.
 
 I<$type> is must be C<before>, C<around> or C<after>.
 
@@ -233,9 +291,19 @@ Example:
 	);
 	monadic($obj)->add_modifier(after => xyzzy => sub{ ... });
 
+See also L<Class::Method::Modifiers::Fast>.
+
 =head3 C<< $meta->inject_base(@component_classes) >>
 
 Adds I<@component_classes> into the is-a hierarchy of the monadic class.
+
+=head1 CAVEATS
+
+Currently, you can neither serialize nor clone objects with monadic classes,
+because they have meta data outside themselves. In addition, the meta data
+usually includes code references.
+
+Patches are welcome.
 
 =head1 DEPENDENCIES
 
@@ -252,6 +320,10 @@ No bugs have been reported.
 Please report any bugs or feature requests to the author.
 
 =head1 SEE ALSO
+
+L<Object::Accessor>.
+
+L<Class::Component>.
 
 L<Class::MOP>.
 
