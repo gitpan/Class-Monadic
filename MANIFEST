@@ -1,4 +1,9 @@
+benchmark/mouse.pl
+benchmark/object_accessor.pl
 Changes
+example/fields.pl
+example/hello.pl
+example/inruby.rb
 inc/Module/Install.pm
 inc/Module/Install/AuthorTests.pm
 inc/Module/Install/Base.pm
@@ -16,6 +21,11 @@ t/02_destruct.t
 t/03_fields.t
 t/04_modifiers.t
 t/05_inject_base.t
+t/06_validator.t
+t/07_serialize.t
+t/08_clone.t
+t/09_leaktrace.t
 xt/01_podspell.t
 xt/02_pod.t
 xt/03_pod-coverage.t
+xt/04_synopsis.t

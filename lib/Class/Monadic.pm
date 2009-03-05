@@ -4,7 +4,7 @@ use 5.008_001;
 use strict;
 use warnings;
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 use Exporter qw(import);
 our @EXPORT_OK   = qw(monadic);
@@ -39,7 +39,13 @@ sub initialize{
 sub _new{
 	my($metaclass, $object) = @_;
 
+	if(Data::Util::is_glob_ref $object){
+		$object = *{$object}{IO};
+	}
+
 	my $class = Scalar::Util::blessed($object) or _cannot_initialize();
+
+	$class =~ s/ ::0x[a-f0-9]+ \z//xms; # remove its monadic identity (in cloning)
 
 	my $meta = bless {
 		class   => $class,
@@ -70,10 +76,18 @@ sub name{
 	return $meta->{class};
 }
 
+sub id{
+	my($meta) = @_;
+
+	return $meta->{id};
+}
+
 sub add_method{
 	my $meta = shift;
 
 	Data::Util::install_subroutine($meta->{sclass}, @_); # dies on fail
+
+	push @{$meta->{methods} ||= []}, @_;
 	return;
 }
 
@@ -84,9 +98,11 @@ sub add_field{
 
 	my $field_map_ref = $meta->{field_map} ||= {};
 
-	while(my($name, $validator) = each %{$fields_ref}){
+	my $fields = $meta->{fields} ||= [];
 
-		my $field_ref = \$field_map_ref->{$name};
+	while(my($name, $validator) = each %{$fields_ref}){
+		my $slot;
+
 		my $validate_sub;
 
 		if($validator){
@@ -103,29 +119,32 @@ sub add_field{
 			}
 		}
 
-		$meta->add_method(
+		Data::Util::install_subroutine($meta->{sclass},
 			"get_$name" => sub{
 				if(@_ > 1){
 					Carp::croak "Too many arguments for get_$name";
 				}
-				return ${$field_ref};
+				return $slot;
 			},
 			"set_$name" => 	sub{
 				if(@_ > 2){
 					Carp::croak "Cannot set multiple values for set_$name";
 				}
-				if($validate_sub){
+				if(defined $validate_sub){
 					my $value = $_[1];
 					$validate_sub->($value)
 						or Carp::croak 'Invalid value ', Data::Util::neat($value), " for set_$name";
-					${$field_ref} = $value;
+					$slot = $value;
 				}
 				else{
-					${$field_ref} = $_[1];
+					$slot = $_[1];
 				}
 				return $_[0]; # chained
 			},
 		);
+
+		$field_map_ref->{$name} = \$slot;
+		push @{$fields}, $name => $validate_sub;
 	}
 	return;
 }
@@ -136,6 +155,7 @@ sub add_modifier{
 	require Class::Method::Modifiers::Fast;
 
 	Class::Method::Modifiers::Fast::_install_modifier($meta->{sclass}, @_);
+	push @{$meta->{modifiers} ||= []}, @_;
 	return;
 }
 
@@ -150,6 +170,30 @@ sub inject_base{
 	return;
 }
 
+sub bless{
+	my($meta, $object) = @_;
+
+	my $newmeta = ref($meta)->initialize($object);
+
+	$newmeta->add_method( @{ $meta->{methods} } )
+		if exists $meta->{methods};
+
+	if(exists $meta->{fields}){
+		$newmeta->add_field(@{$meta->{fields}});
+
+		my $src_map_ref = $meta->{field_map};
+		my $new_map_ref = $newmeta->{field_map};
+		while(my($key, $val_ref) = each %{$src_map_ref}){
+			${ $new_map_ref->{$key} } = ${$val_ref};
+		}
+	}
+
+	$newmeta->inject_base(@{$meta->{isa}}[0 .. $#{$meta->{isa}}-2])
+		if @{$meta->{isa}} > 2; # other than Monadic::Object and its original class
+
+	return $object;
+}
+
 sub DESTROY{
 	my($meta) = @_;
 
@@ -157,7 +201,8 @@ sub DESTROY{
 
 	my $sclass_stashgv = delete $original_stash->{$meta->{id} . '::'};
 
-	@{$meta->{isa}} = ();
+	@{$meta->{isa}}    = ();
+	@{$meta->{fields}} = () ;
 	%{$sclass_stashgv} = ();
 
 	return;
@@ -166,11 +211,21 @@ sub DESTROY{
 package Class::Monadic::Object;
 
 sub clone{
-	Carp::croak sprintf 'Cannot clone monadic object (%s)', Data::Util::neat($_[0]);
+	my($object) = @_;
+	my $meta = $Meta{$object};
+
+	if(my $clone = $meta->{class}->can('clone')){
+		return $meta->bless( $clone->($object) );
+	}
+
+	Carp::croak sprintf q{Can't locate object method "clone" via "%s"}, $meta->{class};
 }
 
 sub STORABLE_freeze{
-	Carp::croak sprintf 'Cannot serialize monadic object (%s)', Data::Util::neat($_[0]);
+	my($object, $cloning) = @_;
+
+	return if $cloning;
+	Carp::croak sprintf 'Cannot serialize monadic object (%s)', Data::Util::neat($object);
 }
 
 1;
@@ -184,7 +239,7 @@ Class::Monadic - Provides monadic methods (a.k.a. singleton methods)
 
 =head1 VERSION
 
-This document describes Class::Monadic version 0.02.
+This document describes Class::Monadic version 0.03.
 
 =head1 SYNOPSIS
 
@@ -193,15 +248,15 @@ This document describes Class::Monadic version 0.02.
 	my $ua1 = LWP::UserAgent->new();
 
 	Class::Monadic->initialize($ua1)->add_method(
-		foo => sub{ ... },
+		hello => sub{ print "Hello, world!\n" },
 	);
 
-	$dbh1->foo(...); # OK
+	$ua1->hello(); # => Hello, world!
 
 	my $ua2 = LWP::UserAgent->new();
 
 	$ua2->foo(); # throws "Can't locate object method ..."
-	              # because foo() is $ua1 specific.
+	             # because foo() is $ua1 specific.
 
 	# import a syntax sugar to make an object monadic
 	use Class::Monadic qw(monadic);
@@ -258,6 +313,12 @@ and returns C<Class::Monadic> instance, I<$meta>.
 
 Returns the name of the monadic class.
 
+=head3 C<< $meta->id >>
+
+Returns the ID of the monadic class.
+
+Its real class name is C<< $meta->name . '::' . $meta->id >>;
+
 =head3 C<< $meta->add_method(%name_code_pairs) >>
 
 Adds methods into the monadic class.
@@ -297,11 +358,14 @@ See also L<Class::Method::Modifiers::Fast>.
 
 Adds I<@component_classes> into the is-a hierarchy of the monadic class.
 
+=head3 C<< $meta->bless($another_object) >>
+
+Copies all the features of I<$meta> into I<$another_object>.
+
 =head1 CAVEATS
 
-Currently, you can neither serialize nor clone objects with monadic classes,
-because they have meta data outside themselves. In addition, the meta data
-usually includes code references.
+You cannot serialize objects with monadic classes,
+because its monadic features usually includes code references.
 
 Patches are welcome.
 

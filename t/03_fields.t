@@ -1,7 +1,7 @@
 #!perl -w
 
 use strict;
-use Test::More tests => 8;
+use Test::More tests => 11;
 use Test::Exception;
 use Class::Monadic qw(:all);
 
@@ -18,6 +18,10 @@ my $t2 = T->new;
 
 monadic($t1)->add_field(qw(foo));
 monadic($t2)->add_field(qw(bar baz));
+
+is(T->can('get_foo'), undef);
+is(T->can('get_bar'), undef);
+is(T->can('get_baz'), undef);
 
 lives_and{
 	$t1->set_foo(42);
