@@ -4,7 +4,7 @@ use 5.008_001;
 use strict;
 use warnings;
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
 use Exporter qw(import);
 our @EXPORT_OK   = qw(monadic);
@@ -14,6 +14,7 @@ use Carp ();
 use Data::Util ();
 use Scalar::Util ();
 use Hash::FieldHash ();
+
 #use Class::Method::Modifiers::Fast ();
 
 Hash::FieldHash::fieldhash my %Meta;
@@ -36,10 +37,11 @@ sub initialize{
 	return $Meta{$object} ||= $class->_new($object);
 }
 
+
 sub _new{
 	my($metaclass, $object) = @_;
 
-	if(Data::Util::is_glob_ref $object){
+	if(Data::Util::is_glob_ref($object)){
 		$object = *{$object}{IO};
 	}
 
@@ -48,14 +50,20 @@ sub _new{
 	$class =~ s/ ::0x[a-f0-9]+ \z//xms; # remove its monadic identity (in cloning)
 
 	my $meta = bless {
-		class   => $class,
-		id      => sprintf('0x%x', Scalar::Util::refaddr($object)),
+		class     => $class,
+		id        => sprintf('0x%x', Scalar::Util::refaddr($object)),
 
-		object  => $object,
-		isa     => undef,
-		sclass  => undef,
+		object    => $object,
+		isa       => undef,
+		sclass    => undef,
+		methods   => undef,
+		modifiers => undef,
+		fields    => undef,
+		field_map => undef,
 	}, $metaclass;
 	Scalar::Util::weaken( $meta->{object} );
+
+	&Internals::SvREADONLY($meta, 1); # lock_keys(%{$meta})
 
 	my $sclass      = $class . '::' . $meta->{id};
 	my $sclass_isa  = do{ no strict 'refs'; \@{$sclass . '::ISA'} };
@@ -63,7 +71,11 @@ sub _new{
 	$meta->{sclass} = $sclass;
 	$meta->{isa}    = $sclass_isa;
 
-	@{$sclass_isa} = ('Class::Monadic::Object', $class);
+	my $base = $metaclass . '::Object';
+	if($class->can('clone')){
+		$base .= '::Clonable';
+	}
+	@{$sclass_isa} = ($base, $class);
 
 	bless $object, $sclass; # re-bless
 	return $meta;
@@ -82,6 +94,7 @@ sub id{
 	return $meta->{id};
 }
 
+*add_methods = \&add_method; # alias
 sub add_method{
 	my $meta = shift;
 
@@ -91,6 +104,7 @@ sub add_method{
 	return;
 }
 
+*add_fields = \&add_field; # alias
 sub add_field{
 	my $meta = shift;
 
@@ -139,7 +153,7 @@ sub add_field{
 				else{
 					$slot = $_[1];
 				}
-				return $_[0]; # chained
+				return $_[0];
 			},
 		);
 
@@ -162,7 +176,8 @@ sub add_modifier{
 sub inject_base{
 	my($meta, @components) = @_;
 
-	# NOTE: In 5.10.0, do{unshift @ISA, @classes} may cause 'uninitialized' warnings
+	# NOTE: In 5.10.0, do{unshift @ISA, @classes} may cause 'uninitialized' warnings.
+	
 	@{$meta->{isa}} = (
 		(grep{ not $meta->{object}->isa($_) } @components),
 		@{$meta->{isa}},
@@ -175,16 +190,16 @@ sub bless{
 
 	my $newmeta = ref($meta)->initialize($object);
 
-	$newmeta->add_method( @{ $meta->{methods} } )
+	$newmeta->add_methods( @{ $meta->{methods} } )
 		if exists $meta->{methods};
 
 	if(exists $meta->{fields}){
-		$newmeta->add_field(@{$meta->{fields}});
+		$newmeta->add_fields(@{$meta->{fields}});
 
 		my $src_map_ref = $meta->{field_map};
 		my $new_map_ref = $newmeta->{field_map};
 		while(my($key, $val_ref) = each %{$src_map_ref}){
-			${ $new_map_ref->{$key} } = ${$val_ref};
+			${$new_map_ref->{$key}} = ${$val_ref};
 		}
 	}
 
@@ -196,13 +211,11 @@ sub bless{
 
 sub DESTROY{
 	my($meta) = @_;
-
 	my $original_stash = Data::Util::get_stash($meta->{class});
 
 	my $sclass_stashgv = delete $original_stash->{$meta->{id} . '::'};
 
 	@{$meta->{isa}}    = ();
-	@{$meta->{fields}} = () ;
 	%{$sclass_stashgv} = ();
 
 	return;
@@ -210,23 +223,24 @@ sub DESTROY{
 
 package Class::Monadic::Object;
 
-sub clone{
-	my($object) = @_;
-	my $meta = $Meta{$object};
-
-	if(my $clone = $meta->{class}->can('clone')){
-		return $meta->bless( $clone->($object) );
-	}
-
-	Carp::croak sprintf q{Can't locate object method "clone" via "%s"}, $meta->{class};
-}
-
 sub STORABLE_freeze{
 	my($object, $cloning) = @_;
 
 	return if $cloning;
 	Carp::croak sprintf 'Cannot serialize monadic object (%s)', Data::Util::neat($object);
 }
+
+package Class::Monadic::Object::Clonable;
+our @ISA = qw(Class::Monadic::Object);
+
+sub clone{
+	my($object) = @_;
+	my $meta = $Meta{$object};
+
+	my $clone = $meta->{class}->can('clone') or Carp::croak(qq{Cannot find "clone" method for $meta->{class}});
+	return $meta->bless( $clone->($object) );
+}
+
 
 1;
 __END__
@@ -239,7 +253,7 @@ Class::Monadic - Provides monadic methods (a.k.a. singleton methods)
 
 =head1 VERSION
 
-This document describes Class::Monadic version 0.03.
+This document describes Class::Monadic version 0.04.
 
 =head1 SYNOPSIS
 
@@ -247,7 +261,7 @@ This document describes Class::Monadic version 0.03.
 
 	my $ua1 = LWP::UserAgent->new();
 
-	Class::Monadic->initialize($ua1)->add_method(
+	Class::Monadic->initialize($ua1)->add_methods(
 		hello => sub{ print "Hello, world!\n" },
 	);
 
@@ -265,12 +279,12 @@ This document describes Class::Monadic version 0.03.
 	# now $ua1 is-a both SomeComponent and OtherComponent
 
 	# per-object fields
-	monadic($ua1)->add_field(qw(x y z));
+	monadic($ua1)->add_fields(qw(x y z));
 	$ua1->set_x(42);
 	print $ua1->get_x(); # => 42
 
 	# per-object fields with validation
-	monadic($ua1)->add_field(
+	monadic($ua1)->add_fields(
 		foo => qr/^\d+$/,
 		bar => [qw(apple banana)],
 		qux => \&is_something,
@@ -282,7 +296,7 @@ C<Class::Monadic> provides per-object classes, B<monadic classes>. It is also
 known as B<singleton classes> in other languages, e.g. C<Ruby>.
 
 Monadic classes is used in order to define B<monadic methods>, i.e. per-object
-methods (a.k.a. B<singleton methods>), which are only available at the specific
+methods (a.k.a. B<singleton methods>), which are available only at the
 object they are defined into.
 
 All the meta data that C<Class::Monadic> deals with are outside the object
@@ -321,16 +335,21 @@ Its real class name is C<< $meta->name . '::' . $meta->id >>;
 
 =head3 C<< $meta->add_method(%name_code_pairs) >>
 
+=head3 C<< $meta->add_methods(%name_code_pairs) >>
+
 Adds methods into the monadic class.
 
 =head3 C<< $meta->add_field(@field_names) >>
 
-Adds fields and accessors named I<get_$name>/I<set_$name> into the monadic class.
+=head3 C<< $meta->add_fields(@field_names) >>
+
+Adds field accessors named I<get_$name>/I<set_$name> into the monadic class.
+Setters are chainable like C<< $obj->set_foo(42)->set_bar(3.14) >>.
 
 These fields are not stored in the object. Rather, stored in its class.
 
 This feature is like what C<Object::Accessor> provides, but C<Class::Monadic>
-is available for all the classes existing, whareas C<Object::Accessor>
+is available for all the classes existing, whereas C<Object::Accessor>
 is only available in classes that is-a C<Object::Accessor>.
 
 =head3 C<< $meta->add_modifier($type, @method_names, $code) >>
@@ -364,8 +383,9 @@ Copies all the features of I<$meta> into I<$another_object>.
 
 =head1 CAVEATS
 
-You cannot serialize objects with monadic classes,
-because its monadic features usually includes code references.
+Although you can clone objects with monadic class, you cannot serialize
+these objects because its monadic features usually includes
+code references.
 
 Patches are welcome.
 
@@ -376,6 +396,8 @@ Perl 5.8.1 or later.
 C<Data::Util>.
 
 C<Hash::FieldHash>.
+
+C<Class::Method::Modifiers::Fast>.
 
 =head1 BUGS
 

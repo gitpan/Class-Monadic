@@ -1,5 +1,11 @@
 Revision history for Perl extension Class::Monadic
 
+0.04 Sat Mar 28 12:49:40 2009
+	- add add_methods() as an alias of add_method()
+	- add add_fields()  as an alias of add_field()
+	- fix t/09_leaktrace.t
+	- add Test::LeakTrace to test_requires
+
 0.03 Thu Mar  5 10:20:44 2009
 	- add $meta->bless() method to copy its features into an object
 	- enable $obj->clone()
